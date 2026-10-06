@@ -1,0 +1,2 @@
+echo "build/" >> .dockerignore
+echo ".gradle/" >> .dockerignore
