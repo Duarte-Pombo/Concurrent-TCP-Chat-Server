@@ -1,101 +1,143 @@
-# CPD Chat Server
+# Concurrent TCP Chat Server
 
-Java SE 21 TCP chat system with concurrency and fault tolerance — FEUP CPD assignment 2.
+> A high-performance, fault-tolerant TCP chat server built with Java 21, featuring low-level thread synchronization, automated session recovery, and local AI assistance.
+
+---
+
+## Features
+
+- **Multi-client TCP server**: one handler thread per client, with a dedicated writer thread draining a per-client outgoing queue (a slow client never blocks the server).
+- **Authentication**: user registration and login with hashed passwords.
+- **Chat rooms**: public and password-protected rooms, real-time broadcast, and persistent message history replayed on join.
+- **Session recovery**: after a connection drop, the client reconnects automatically and resumes its session using a server-side token.
+- **AI room**: chat with `gemma3:1b` through a local [Ollama](https://ollama.com) instance (`/ask`, `/summarize`, `/translate`).
+- **Optional TLS**: encrypted connections via `SSLServerSocket` / `SSLSocketFactory` and a Java KeyStore.
+- **Hand-written concurrency primitives**: a custom bounded blocking queue (`ReentrantLock` + `Condition`) and explicit locking instead of `java.util.concurrent` collections.
 
 ## Requirements
 
-- Java 21+
-- Docker (for Ollama AI)
-- bash
+| Tool | Needed for |
+|---|---|
+| Java 21+ | Building and running |
+| Docker | Ollama (AI room) and the Docker setup |
+| bash | Helper scripts |
+| ngrok *(optional)* | Playing across different machines |
 
-## Running on multiple computers (uses ngrok)
-
-### Host
-```bash
-ngrok tcp 1234
-
-# Copy the address and port. Example: 6.tcp.eu.ngrok.io:16843
-```
-
-### Clients
-```bash
-./gradlew assemble
-
-java -jar build/libs/client.jar 6.tcp.eu.ngrok.io 16843
-# Copied address and port
-```
-
-
-## Running via docker on the local host
-
-```bash
-# Building the server, takes some time to download docker
-docker-compose up -d server
-
-# Ensuring the model is active
-docker exec -it chat-ollama ollama pull gemma3:1b
-
-# Running individual clients (self destructing containers)
-docker-compose run --rm client
-```
 ## Quick Start
 
 ```bash
-bash scripts/start.sh          # launch Ollama + build + start server
-# In another terminal:
+# Terminal 1: start Ollama, build, and run the server
+bash scripts/start.sh
+
+# Terminal 2: start a client
 ./gradlew runClient
 ```
 
-Pass `ssl=true` to enable TLS:
+To enable TLS, set the flag on both sides:
 
 ```bash
 ssl=true bash scripts/start.sh
 ./gradlew runClient -Dssl=true
 ```
 
-## Gradle Commands
+## Other Ways to Run
+
+### Docker
 
 ```bash
-./gradlew build           # compile + unit tests + both jars
-./gradlew test            # unit tests only
-./gradlew integrationTest # integration tests (needs a running server)
-./gradlew runServer       # start the server
-./gradlew runClient       # start an interactive client
-./gradlew runServer -Dssl=true   # SSL mode
+docker-compose up -d server                          # build and start the server
+docker exec -it chat-ollama ollama pull gemma3:1b    # make sure the model is available
+docker-compose run --rm client                       # launch a (self-destructing) client
 ```
 
-## ChatRoom Message History Cap
+### Across multiple computers (ngrok)
+
+**Host**
 
 ```bash
-java -Droom.history.size=XXX Server   # override the default (100) to XXX
+ngrok tcp 1234
+# Note the forwarded address, e.g. 6.tcp.eu.ngrok.io:16843
 ```
 
-## Tests
+**Clients**
 
 ```bash
-./gradlew test            # unit tests
-./gradlew integrationTest # integration tests (start server first)
+./gradlew assemble
+java -jar build/libs/client.jar <ngrok-host> <ngrok-port>
 ```
 
-Tests cover concurrency, authentication, rooms, and logout across unit and integration suites.
+## Usage
+
+Once connected, register or log in, then pick or create a room.
+
+| Command | Description |
+|---|---|
+| `/help` | Show available commands |
+| `/list` | List rooms |
+| `/join <room>` | Join a room (prompts for a password if private) |
+| `/leave` | Leave the current room (returns to the room list) |
+| `/logout` | End the session and invalidate the token |
+
+In the AI room:
+
+| Command | Description |
+|---|---|
+| `/ask <question>` | Ask the assistant a question |
+| `/summarize` | Summarize the conversation |
+| `/translate <text>` | Translate text |
+
+## Gradle Tasks
+
+```bash
+./gradlew build            # compile + unit tests + jars (client.jar, server.jar, chat.jar)
+./gradlew test             # unit tests
+./gradlew integrationTest  # integration tests (requires a running server)
+./gradlew runServer        # start the server  (add -Dssl=true for TLS)
+./gradlew runClient        # start an interactive client
+```
+
+## Configuration
+
+| Option | Default | Description |
+|---|---|---|
+| `-Droom.history.size=N` | `100` | Maximum messages kept/replayed per room |
+| `ssl=true` / `-Dssl=true` | off | Enable TLS (keystore generated by `scripts/gen-keystore.sh`) |
+
+Example:
+
+```bash
+java -Droom.history.size=250 -cp build/classes/java/main Server
+```
+
+## Architecture at a Glance
+
+- **Thread-per-client** model: `Server` accepts connections and spawns a `ClientHandler` for each.
+- **Explicit connection state machine**: `DISCONNECTED → AUTHENTICATING → ROOM_SELECTING → MESSAGING → TERMINATED`, so invalid actions (e.g. messaging before login) are rejected in a single place.
+- **Custom binary protocol**: 4-byte length prefix, 1-byte opcode, UTF-8 payload (`AUTH`, `REGISTER`, `JOIN`, `LEAVE`, `MSG`, `BROADCAST`, `RECONNECT`, `LOGOUT`, ...).
+- **Managers** own shared state: `UserManager` (credentials), `SessionManager` (tokens), `RoomManager` (rooms).
+- **Persistence** is file-based under `data/` (users, tokens, per-room history and passwords).
+
+For design rationale, lock-granularity analysis and diagrams, see the full report: [`doc/report.pdf`](doc/report.pdf).
 
 ## Project Structure
 
 ```
-src/               Production code (Server, Client, Protocol, Managers, Room)
-test/              Test suites (unit + integration)
-scripts/           Build and test automation
-bin/               Compiled production classes (generated)
-out-test/          Compiled test classes (generated)
-lib/               Test dependencies (JUnit) — download on first setup
+src/        Production code (Server, Client, ClientHandler, Protocol, managers, Room, AIRoom, BoundedBlockingQueue)
+test/       Unit and integration tests (JUnit 5)
+scripts/    Build, test, keystore and start scripts
+data/       Persisted users, sessions and room history/passwords
+doc/        Report (PDF/LaTeX) and diagrams
+Dockerfile, docker-compose.yml, build.gradle
 ```
 
-## Implementation Status
+## Testing
 
-✅ Multi-client TCP server with virtual threads
-✅ User registration and authentication with SHA-256
-✅ Token-based sessions and reconnection support
-✅ Room management with real-time message broadcast
-✅ LOGOUT command with session invalidation
-✅ Concurrency safety with explicit locks (no java.util.concurrent collections)
-✅ Full test coverage with JUnit 5
+Concurrency, authentication, rooms and logout are covered by:
+
+- **Unit tests**: `RoomConcurrencyTest`, `RoomManagerConcurrencyTest`, `SessionManagerConcurrencyTest`, `UserManagerConcurrencyTest`
+- **Integration tests**: `ServerConcurrencyTest`, `LogoutTest` (start the server first)
+
+```bash
+./gradlew test
+./gradlew integrationTest
+```
